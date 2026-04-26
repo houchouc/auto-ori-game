@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>AUTO ORI!</title>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <script type="text/babel" src="auto-ori.jsx"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #root { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+    button { -webkit-tap-highlight-color: transparent; }
+    ::-webkit-scrollbar { width: 0; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+/* ── Default player stats ─────────────────────────────────── */
+const DEFAULT_STATS = {
+  bestBankedRun:     14200,
+  totalRuns:         23,
+  highestMultiplier: 4,
+  avgPrecision:      72,
+  streak:            3,
+};
+
+/* ══════════════════════════════════════════════════════════
+   ROOT APP
+   Status: "intro" | "playing" | "banked" | "busted"
+   Multiplier only changes at checkpoints (every 5 cars).
+   Strike → charge resets to 0, multiplier resets to x1.
+   2 strikes → bust.
+══════════════════════════════════════════════════════════ */
+function App() {
+  const [narrow, setNarrow] = useState(window.innerWidth < 480);
+  useEffect(() => {
+    const fn = () => setNarrow(window.innerWidth < 480);
+    window.addEventListener("resize", fn);
+    return () => window.removeEventListener("resize", fn);
+  }, []);
+
+  /* ── Tabs & status ── */
+  const [tab,    setTab]    = useState("home");
+  const [status, setStatus] = useState("intro");
+
+  /* ── Persistent stats ── */
+  const [stats,      setStats]      = useState(DEFAULT_STATS);
+  const [recentRuns, setRecentRuns] = useState(RECENT_RUNS);
+
+  /* ── Run state ── */
+  const [carIdx,      setCarIdx]      = useState(0);
+  const [carsPlayed,  setCarsPlayed]  = useState(0);
+  const [multiplier,  setMultiplier]  = useState(1);
+  const [charge,      setCharge]      = useState(0);   // 0–5
+  const [strikes,     setStrikes]     = useState(0);
+  const [unbanked,    setUnbanked]    = useState(0);
+  const [highestMult, setHighestMult] = useState(1);
+  const [guess,       setGuess]       = useState(15000);
+  const [revealed,    setRevealed]    = useState(false);
+  const [lastReward,  setLastReward]  = useState(null);
+  const [showCashout, setShowCashout] = useState(false);
+
+  /* ── Result carry ── */
+  const [bankedTotal, setBankedTotal] = useState(0);
+  const [prevBest,    setPrevBest]    = useState(0);
+  const xpEarned = useRef(0);
+
+  const car = MAIN_POOL[carIdx];
+
+  /* ── Start run ── */
+  const startRun = () => {
+    const idx = pickNext(-1);
+    setCarIdx(idx);
+    setGuess(midGuess(MAIN_POOL[idx]));
+    setCarsPlayed(0);
+    setMultiplier(1);
+    setCharge(0);
+    setStrikes(0);
+    setUnbanked(0);
+    setHighestMult(1);
+    setRevealed(false);
+    setLastReward(null);
+    setShowCashout(false);
+    setPrevBest(stats.bestBankedRun);
+    setStatus("playing");
+  };
+
+  /* ── Validate guess ── */
+  const handleValidate = () => {
+    if (navigator.vibrate) navigator.vibrate(25);
+    const reward = resolveHit(guess, car.actual, multiplier, strikes);
+    setLastReward(reward);
+    setRevealed(true);
+
+    if (!reward.bust) {
+      setUnbanked(u => u + reward.points);
+      setStrikes(reward.newStrikes);
+    }
+  };
+
+  /* ── Advance after reveal ── */
+  const handleNext = () => {
+    // Bust: end run, show bust screen
+    if (lastReward && lastReward.bust) {
+      xpEarned.current = 0;
+      commitStats(0);
+      setStatus("busted");
+      return;
+    }
+
+    const newCarsPlayed = carsPlayed + 1;
+    setCarsPlayed(newCarsPlayed);
+    setRevealed(false);
+    setLastReward(null);
+
+    // Strike: reset charge + multiplier, load next car
+    if (lastReward && lastReward.strikeAdded) {
+      setCharge(0);
+      setMultiplier(1);
+      const idx = pickNext(carIdx);
+      setCarIdx(idx);
+      setGuess(midGuess(MAIN_POOL[idx]));
+      return;
+    }
+
+    // Normal hit: advance charge
+    const newCharge = charge + 1;
+    setHighestMult(h => Math.max(h, multiplier));
+
+    if (newCharge >= MM.CHECKPOINT) {
+      // Checkpoint reached — show cashout sheet
+      setCharge(newCharge); // = 5, bar fully lit
+      setShowCashout(true);
+      return;
+    }
+
+    setCharge(newCharge);
+    const idx = pickNext(carIdx);
+    setCarIdx(idx);
+    setGuess(midGuess(MAIN_POOL[idx]));
+  };
+
+  /* ── Bank at checkpoint ── */
+  const handleBank = () => {
+    xpEarned.current = xpForBank(unbanked, carsPlayed);
+    commitStats(unbanked);
+    setBankedTotal(unbanked);
+    setShowCashout(false);
+    setStatus("banked");
+  };
+
+  /* ── Continue past checkpoint (multiplier doubles) ── */
+  const handleContinue = () => {
+    const newMult = Math.min(MM.MULT_CAP, multiplier * 2);
+    setMultiplier(newMult);
+    setHighestMult(h => Math.max(h, newMult));
+    setCharge(0);
+    setShowCashout(false);
+    const idx = pickNext(carIdx);
+    setCarIdx(idx);
+    setGuess(midGuess(MAIN_POOL[idx]));
+  };
+
+  /* ── Commit stats to profile ── */
+  const commitStats = (banked) => {
+    setStats(prev => ({
+      ...prev,
+      bestBankedRun:     Math.max(prev.bestBankedRun, banked),
+      totalRuns:         prev.totalRuns + 1,
+      highestMultiplier: Math.max(prev.highestMultiplier, highestMult),
+    }));
+    if (banked > 0) {
+      setRecentRuns(prev => {
+        const id  = "M-" + (120 + prev.length);
+        const rank = computeRank(banked);
+        const pct  = computePct(rank);
+        return [{ id, date:"20 avr", score:banked, percentile:pct }, ...prev].slice(0,10);
+      });
+    }
+  };
+
+  /* ── Device shell ── */
+  const phoneW = narrow ? "100%" : 390;
+  const phoneH = narrow ? "100dvh" : 844;
+
+  return (
+    <div style={{
+      width:"100%", minHeight:"100vh",
+      display:"flex", alignItems:"center", justifyContent:"center",
+      background: narrow ? C.bg : "#030304",
+      fontFamily:"Manrope, sans-serif",
+    }}>
+      <style>{FONT_STYLES}</style>
+
+      <div style={{
+        position:"relative", overflow:"hidden",
+        width:phoneW, height:phoneH,
+        background:C.bg,
+        borderRadius: narrow ? 0 : 52,
+        border: narrow ? "none" : "1px solid rgba(255,255,255,0.08)",
+        boxShadow: narrow ? "none" : "0 48px 120px rgba(0,0,0,0.85), 0 0 0 10px #0f0f10",
+        color:C.text,
+      }}>
+
+        {/* ── iOS status bar ── */}
+        <div style={{
+          position:"absolute", top:0, left:0, right:0, zIndex:100,
+          display:"flex", justifyContent:"space-between", alignItems:"center",
+          padding:"14px 24px 0",
+          fontSize:12, fontWeight:600, color:C.text, pointerEvents:"none",
+        }}>
+          <span>9:41</span>
+          <span style={{fontSize:10, opacity:.35}}>●●●●● 5G</span>
+        </div>
+
+        {/* ════════════ INTRO ════════════ */}
+        {status === "intro" && (
+          <div style={{position:"absolute",inset:0,paddingTop:36,display:"flex",flexDirection:"column"}}>
+            <div style={{flex:1,minHeight:0,overflow:"hidden"}}>
+              {tab === "home"    && <IntroState onPlay={startRun} stats={stats}/>}
+              {tab === "profile" && <ProfileTab stats={stats} recentRuns={recentRuns}/>}
+            </div>
+            <BottomNav activeTab={tab} onChange={setTab}/>
+          </div>
+        )}
+
+        {/* ════════════ PLAYING ════════════ */}
+        {status === "playing" && (
+          <div style={{position:"absolute",inset:0,paddingTop:36}}>
+            <PlayScreen
+              car={car}
+              carsPlayed={carsPlayed}
+              multiplier={multiplier}
+              charge={charge}
+              strikes={strikes}
+              unbanked={unbanked}
+              revealed={revealed}
+              guess={guess}
+              setGuess={setGuess}
+              lastReward={lastReward}
+              onPrimary={revealed ? handleNext : handleValidate}
+            />
+            {showCashout && (
+              <CashoutSheet
+                unbanked={unbanked}
+                multiplier={multiplier}
+                strikes={strikes}
+                carsPlayed={carsPlayed}
+                onBank={handleBank}
+                onContinue={handleContinue}
+              />
+            )}
+          </div>
+        )}
+
+        {/* ════════════ BANKED ════════════ */}
+        {status === "banked" && (
+          <BankedResult
+            banked={bankedTotal}
+            prevBest={prevBest}
+            carsPlayed={carsPlayed}
+            highestMult={highestMult}
+            xpEarned={xpEarned.current}
+            onRestart={startRun}
+            onHome={() => { setStatus("intro"); setTab("home"); }}
+          />
+        )}
+
+        {/* ════════════ BUSTED ════════════ */}
+        {status === "busted" && (
+          <BustResult
+            lost={unbanked}
+            carsPlayed={carsPlayed}
+            highestMult={highestMult}
+            lastError={lastReward?.err ?? 0}
+            onRestart={startRun}
+            onHome={() => { setStatus("intro"); setTab("home"); }}
+          />
+        )}
+      </div>
+
+      {!narrow && (
+        <div style={{
+          position:"fixed", bottom:16, left:"50%", transform:"translateX(-50%)",
+          fontSize:11, color:"#333", fontFamily:"Manrope, sans-serif",
+          pointerEvents:"none",
+        }}>
+          Joue sur mobile pour la meilleure expérience
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
